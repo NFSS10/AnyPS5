@@ -261,6 +261,7 @@ void Run(const Context& context, const WatchedBlock& block) {
         watchedReads = 0;
         const auto texture = DepthSurfaceTexture(context, words, resource, components);
         Require(texture != nullptr, std::string("the 2D array over the depth surface was not sampled through its depth planes ") + when);
+        Require(!texture->RefreshedPerUse(), std::string("the 2D array over the depth surface stayed out of the resource cache ") + when);
         return watchedReads.load();
     };
     try {

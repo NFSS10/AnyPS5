@@ -259,6 +259,7 @@ void TestStencilUnormView(const Context& context) {
     Require(lookup(context, {stencil, FormatR8Uint, 320, 180}) != nullptr && imageReads.empty() && imageWrites.empty(), "an R8_UINT view of a stencil plane must sample it without a copy");
     const auto first = lookup(context, {stencil, FormatR8Unorm, 320, 180});
     Require(first != nullptr && lastImageFormat == VK_FORMAT_R8_UNORM, "an R8_UNORM view of a stencil plane must sample an R8_UNORM copy of it");
+    Require(first->RefreshedPerUse(), "an R8_UNORM copy of a stencil plane must stay out of the resource cache");
     const auto copy = createdImages.back();
     const std::vector<std::pair<VkImage, VkImageAspectFlags>> read{{surface, VK_IMAGE_ASPECT_STENCIL_BIT}};
     const std::vector<std::pair<VkImage, VkImageAspectFlags>> written{{copy, VK_IMAGE_ASPECT_COLOR_BIT}};

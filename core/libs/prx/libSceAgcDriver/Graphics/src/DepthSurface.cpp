@@ -469,7 +469,7 @@ public:
         auto texture = std::make_shared<Texture>(context, useSampleShadow ? sampleShadow->image : image, hostFormat, stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, components, viewType, 0, sampledImage);
         if (multisampled) {
             Require(samplingActive, "native multisample depth sampling requires its creation-time owner");
-            texture->MarkRefreshedPerUse();
+            if (useSampleShadow) texture->MarkRefreshedPerUse();
         }
         textures.emplace(key, texture);
         return texture;
@@ -1272,7 +1272,7 @@ public:
         auto& texture = textures[key];
         if (texture == nullptr) {
             texture = std::make_shared<Texture>(context, image, format, aspect(), components, viewType, baseLayer, owned);
-            texture->MarkRefreshedPerUse();
+            if (viewType == VK_IMAGE_VIEW_TYPE_2D) texture->MarkRefreshedPerUse();
         }
         return texture;
     }

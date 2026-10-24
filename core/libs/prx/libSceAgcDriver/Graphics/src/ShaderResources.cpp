@@ -2579,6 +2579,26 @@ std::atomic<std::uint64_t> resourceCacheFinds{0};
 std::atomic<std::uint64_t> resourceCacheTouches{0};
 std::atomic<std::uint64_t> depthGuardRefusals{0};
 
+struct RefusalCounters {
+    std::atomic<std::uint64_t> copiedWrites{0};
+    std::atomic<std::uint64_t> lease{0};
+    std::atomic<std::uint64_t> bda{0};
+    std::atomic<std::uint64_t> multisample{0};
+    std::atomic<std::uint64_t> refreshedPerUse{0};
+    std::atomic<std::uint64_t> bigData{0};
+    std::atomic<std::uint64_t> regions{0};
+    std::atomic<std::uint64_t> uncachedImage{0};
+    std::atomic<std::uint64_t> releasedTexture{0};
+    std::atomic<std::uint64_t> inserts{0};
+    std::atomic<std::uint64_t> lruEvictions{0};
+    std::atomic<std::uint64_t> tableEvictions{0};
+};
+
+RefusalCounters& Refusals() {
+    static RefusalCounters counters;
+    return counters;
+}
+
 }
 
 namespace {
@@ -2595,11 +2615,15 @@ void ShaderResources::noteReusable() {
     captureValidation();
     reusable = false;
     directRegions.clear();
-    if (guestMemory.HasCopiedWrites() || HoldsLease() || usesBda || !multisampleSources.empty() || (bda != nullptr && LoopGuardEnabled())) return;
-    if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return;
-    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return;
+    auto& refusals = Refusals();
+    if (guestMemory.HasCopiedWrites()) { ++refusals.copiedWrites; return; }
+    if (HoldsLease()) { ++refusals.lease; return; }
+    if (usesBda || (bda != nullptr && LoopGuardEnabled())) { ++refusals.bda; return; }
+    if (!multisampleSources.empty()) { ++refusals.multisample; return; }
+    if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) { ++refusals.refreshedPerUse; return; }
+    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) { ++refusals.bigData; return; }
     const auto regions = guestMemory.DirectRegions();
-    if (!regions.has_value()) return;
+    if (!regions.has_value()) { ++refusals.regions; return; }
     for (const auto& [begin, end] : *regions) {
         // No reconcile here: the upload just took these imports, and the set is about to be recorded
         // against them.
@@ -2607,7 +2631,7 @@ void ShaderResources::noteReusable() {
         // Read-only image mirrors (exe ranges) are as stable as imports; their serials have the top
         // bit set, so the two spaces never collide.
         if (serial == 0) serial = ImageMirrorSerial(context, begin, static_cast<std::size_t>(end - begin));
-        if (serial == 0) return;
+        if (serial == 0) { ++refusals.regions; return; }
         directRegions.push_back({begin, end, serial});
     }
     for (const auto& cut : guestMemory.CutRegions()) {
@@ -2622,6 +2646,11 @@ void ShaderResources::noteReusable() {
 
 std::uint64_t ShaderResources::DepthGuardRefusals() {
     return depthGuardRefusals.load(std::memory_order_relaxed);
+}
+
+ShaderResources::RefusalCounts ShaderResources::CacheRefusals() {
+    auto& counters = Refusals();
+    return {counters.copiedWrites.load(std::memory_order_relaxed), counters.lease.load(std::memory_order_relaxed), counters.bda.load(std::memory_order_relaxed), counters.multisample.load(std::memory_order_relaxed), counters.refreshedPerUse.load(std::memory_order_relaxed), counters.bigData.load(std::memory_order_relaxed), counters.regions.load(std::memory_order_relaxed), counters.uncachedImage.load(std::memory_order_relaxed), counters.releasedTexture.load(std::memory_order_relaxed), counters.inserts.load(std::memory_order_relaxed), counters.lruEvictions.load(std::memory_order_relaxed), counters.tableEvictions.load(std::memory_order_relaxed)};
 }
 
 bool ShaderResources::NeverReusable(std::span<const CompiledShader> shaders) {
@@ -3973,7 +4002,9 @@ void ResourceCache::noteMiss(const Key& key) {
 void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> resources, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
     std::lock_guard lock(mutex);
     dropReleasedTextures(evicted);
-    if (!resources->HasCachedStorageImages() || resources->HoldsReleasedTexture()) return;
+    auto& refusals = Refusals();
+    if (!resources->HasCachedStorageImages()) { ++refusals.uncachedImage; return; }
+    if (resources->HoldsReleasedTexture()) { ++refusals.releasedTexture; return; }
     if (const auto found = index.find(key); found != index.end()) {
         if (evicted != nullptr) evicted->push_back(std::move(found->second->second));
         entries.erase(found->second);
@@ -3981,6 +4012,7 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
     }
     entries.emplace_front(key, std::move(resources));
     index.emplace(key, entries.begin());
+    ++refusals.inserts;
     if (capacity == 0) {
         const char* value = std::getenv("APS5_RESOURCE_CACHE_ENTRIES");
         const auto parsed = value ? std::strtoull(value, nullptr, 10) : 0ull;
@@ -3989,6 +4021,7 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
     }
     noteUse(key);
     while (entries.size() > capacity) {
+        ++refusals.lruEvictions;
         noteEvicted(entries.back().first);
         if (evicted != nullptr) evicted->push_back(std::move(entries.back().second));
         index.erase(entries.back().first);
@@ -4004,6 +4037,7 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
             continue;
         }
         tables -= elements;
+        ++refusals.tableEvictions;
         if (evicted != nullptr) evicted->push_back(std::move(it->second));
         index.erase(it->first);
         it = std::prev(entries.erase(it));
