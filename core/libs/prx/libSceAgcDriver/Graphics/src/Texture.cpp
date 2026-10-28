@@ -334,7 +334,7 @@ std::uint64_t SampledTextureMemory() {
     return SampledMemoryCounter().load(std::memory_order_relaxed);
 }
 
-Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare) : context(context) {
+Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare, std::shared_ptr<Buffer> snapshotBuffer) : context(context) {
 
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
@@ -414,8 +414,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 // Entries may also be extents ("3840x2160"), since heap addresses change between runs.
                 dumpWanted = dumpList.find(address) != std::string::npos || dumpList.find(extent) != std::string::npos;
             }
-            auto staging = std::make_shared<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-            std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
+            auto staging = snapshotBuffer != nullptr ? snapshotBuffer : std::make_shared<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            if (snapshotBuffer == nullptr) std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
             auto tiled = std::make_shared<DeviceBuffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             auto linear = std::make_shared<DeviceBuffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             if (profile) Profile().allocate += timer.lap();
